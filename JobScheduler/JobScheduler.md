@@ -1,144 +1,162 @@
-# Job Scheduler Design
+# Distributed Job Scheduler
 
-## Problem Statement
-Design a **Job Scheduler** that can handle scheduling and execution of tasks at scale.
-
----
-
-## Functional Requirements
-1. The system should be able to **schedule millions of tasks per day**.
-2. Support **flexible scheduling**:
-   - Tasks that run **immediately**.
-   - Tasks that run at a **specific time**.
-3. Provide **task prioritization** to ensure critical jobs are executed first.
-4. Handle **different types of tasks**, such as:
-   - Email notifications
-   - File processing
-   - Error retries
-   - Other background jobs
-5. Support **cancellation and rescheduling** of tasks.
-6. Provide **retry mechanism** for transient failures.
+A highly available, fault-tolerant distributed job scheduler built using **Spring Boot**, **Kafka**, and **Cassandra**.  
+The system is designed to reliably schedule, execute, and track jobs with strong guarantees on retry handling, fault recovery, and deduplication.
 
 ---
 
-## Non-Functional Requirements
-1. **High Availability** – The system must not have a single point of failure.
-2. **Scalability** – Must scale with growth in both **task volume and execution load**.
-3. **Consistency** – Ensure **idempotency** so tasks are not processed multiple times.
-4. **Replayability** – Ability to **replay jobs** for auditing or recovery.
-5. **Security** – 
-   - Encrypt **PII data in transit and at rest**.
-   - Services should not be directly exposed to the public.
-   - Implement **authentication & authorization**.
-6. **Auditing** – Track all job submissions, state changes, and executions.
-7. **Dead Letter Queue (DLQ)** – Failed jobs should be captured for later reprocessing or analysis.
-8. **Observability** – Provide **metrics, logs, and alerts** to monitor execution health.
-9. **Low Latency** – Immediate tasks should be executed with minimal delay.
+## 📌 High-Level Architecture
+
+**Components:**
+
+1. **API Service**
+   - Exposes REST APIs to create, update, cancel, or query jobs.
+   - Writes job metadata into **Cassandra**.
+   - Publishes scheduling requests to **Kafka**.
+
+2. **Scheduler Service**
+   - Reads scheduling requests from Kafka.
+   - Persists jobs into Cassandra (if not already present).
+   - Continuously scans Cassandra for jobs that are due for execution.
+   - Dispatches jobs to Kafka `workerTopic`.
+
+3. **Worker Nodes**
+   - Consume jobs from Kafka `workerTopic`.
+   - Execute the business logic associated with the job.
+   - Push job status (success/failure) back to Kafka `statusTopic`.
+
+4. **Result Processor**
+   - Consumes results from `statusTopic`.
+   - Updates Cassandra with final job status, retries, or error details.
 
 ---
 
-## High-Level Architecture
+## 📌 Data Modeling in Cassandra
 
-### Major Components
+Cassandra schema is designed for **fast access and cancellation**:
 
-#### 1. Task Manager (Pods)
-- Receives **incoming events** from the Load Balancer.
-- Enhances the event model with metadata (priority, status, etc.).
-- Persists the enriched task into **Cassandra**.
+- **Table: `jobs`**
+  - `jobId` (UUID, Partition Key)
+  - `scheduleTimeJobs` (Clustering Key)
+  - `status` (Scheduled, Running, Completed, Failed, Cancelled)
+  - `payload` (Job metadata, execution params)
+  - `retryCount`
 
-#### 2. Scheduler
-- **Two scheduler jobs run every minute:**
-
-  **a. Scheduler-1**
-  - Pulls jobIds from Cassandra that are expected to run within the next **30 minutes**.
-  - Retrieves them in a **paginated fashion**, and based on priority, publishes to different **Redis queues**.
-  - Uses a **distributed lock (e.g., ShedLock)** to ensure only one scheduler publishes a given set.
-  
-  **b. Scheduler-2**
-  - Pulls jobs from Redis that are scheduled within the **next 1 minute**.
-  - Fetches job details from Cassandra.
-  - Publishes jobs to **different Kafka topics** based on priority (where worker nodes consume).
-  - Jobs failing DB fetch will be pushed to a **delayed retry topic** with status `DB_READ_FAILURE`.
-
-#### 3. Worker Nodes
-- Subscribed to appropriate Kafka topics (based on priority).
-- Integrated with the right **processing services** (Email Service, File Service, etc.).
-- For each task:
-  - Builds the required payload according to service contract.
-  - Publishes the payload via Kafka or API hook.
-  - Performs **idempotency checks** using Cassandra (ensures only jobs in `WAITING` status are processed).
-- Failed jobs:
-  - Retry up to 3 times within the service.
-  - On repeated failure, pushed to **delayed retry topic** with status `PUBLISH_FAILURE`.
-  - If all retries fail, jobs are moved to the **DLQ** with the last status update for auditing.
+👉 This schema ensures:
+- Quick lookup by `jobId` for **cancellation/updates**.
+- Range queries on `scheduleTimeJobs` for **finding due jobs efficiently**.
 
 ---
 
-## System Flow (End-to-End Lifecycle)
+## 📌 Kafka Usage
 
-1. **Task Submission**
-   - Client → Load Balancer → Task Manager.
-   - Task Manager enriches job, assigns priority/status, persists into Cassandra.
+- **Topic: `scheduleTopic`**
+  - Partition key: `jobId` (ensures all updates for a job go to the same partition).
+  - Used to broadcast new jobs to schedulers.
 
-2. **Pre-Scheduling (30-min Window)**
-   - Scheduler-1 runs every minute.
-   - Pulls jobs due in the next 30 minutes from Cassandra (paginated).
-   - Pushes them into Redis queues based on priority.
+- **Topic: `workerTopic`**
+  - Partition key: `jobId`.
+  - Ensures **job execution happens on one worker only**.
 
-3. **Ready-to-Run Scheduling (1-min Window)**
-   - Scheduler-2 runs every minute.
-   - Pulls jobs due in the next 1 minute from Redis.
-   - Fetches job details from Cassandra.
-   - Publishes them to appropriate Kafka topics based on priority.
-
-4. **Execution**
-   - Worker nodes consume from Kafka.
-   - Validate idempotency using Cassandra (`WAITING` status check).
-   - Forward payload to appropriate service (email, file, etc.).
-
-5. **Failure Handling**
-   - If DB fetch fails → job goes to delayed retry topic (`DB_READ_FAILURE`).
-   - If service publish fails → retry 3 times.
-   - If all retries fail → job sent to delayed retry topic (`PUBLISH_FAILURE`).
-   - If still unprocessed after retries → job moves to DLQ with audit logs.
+- **Topic: `statusTopic`**
+  - Used by workers to send success/failure updates.
+  - Consumed by result processors to update Cassandra.
 
 ---
 
-## Supporting Components
+## 📌 Job Lifecycle
 
-1. **Redis** – Used for **fast access** to near-ready jobIds (quick scheduling decisions).
-2. **Kafka** – Used for:
-   - Preventing duplicate events.
-   - Scaling processing through **partitioned topics**.
-3. **Cassandra** – Used for:
-   - **Fast writes** (high task ingestion rate).
-   - Flexibility in modeling various task types.
-   - **Job table schema**:
-     ```text
-     job (
-       jobId,
-       jsonPayload,
-       priority,
-       creationTimeEpoch,
-       scheduledTimeEpoch,
-       updateTimeEpoch,
-       status
-     )
-     ```
+1. API Service receives job → stores in Cassandra → produces event to `scheduleTopic`.
+2. Scheduler picks it up → checks due time.
+   - If not due → waits.
+   - If due → pushes to `workerTopic`.
+3. Worker consumes → executes → produces result to `statusTopic`.
+4. Result Processor updates Cassandra.
 
 ---
 
-## Future Enhancements
+## 📌 Handling Failures
 
-1. **Immediate Job Optimization** – Directly publish “immediate” jobs from Task Manager to Redis/Kafka (bypassing schedulers) for sub-second latency.  
-2. **Reliable Redis Handoff** – Use Cassandra markers (`ENQUEUED`) to avoid missed jobs if Scheduler-1 crashes mid-process.  
-3. **DLQ Granularity** – Maintain separate DLQs for different failure types (`DB_READ_FAILURE_DLQ`, `PUBLISH_FAILURE_DLQ`).  
-4. **Retry Backoff** – Replace fixed retry (3 attempts) with **exponential backoff + jitter**.  
-5. **Auditing** – Add a **JobHistory table** to capture all state transitions (not just last status).  
-6. **Observability** – Monitor metrics like:  
-   - Scheduler lag (scheduled vs actual execution time).  
-   - Redis/Kafka queue depth per priority.  
-   - DLQ growth rate.  
-7. **Multi-tenancy** – Add tenantId field in job schema to support multiple clients securely.  
+- **Scheduler Crash:**  
+  Since jobs are persisted in Cassandra, another scheduler can resume scanning for due jobs. No jobs are lost.
+
+- **Worker Crash (Mid-Execution):**  
+  Kafka re-delivers the job (at-least-once semantics). Deduplication logic ensures idempotency.
+
+- **Result Processor Crash:**  
+  Kafka ensures results remain until processed. On restart, the processor resumes.
+
+---
+
+## 📌 Retry & Delayed Execution
+
+- Failed jobs are **re-sent to a delayed retry queue**.
+- Kafka does not natively support delayed queues, so we implement retries via **Cassandra + scheduler**:
+  - On failure, job is reinserted into Cassandra with new `scheduleTimeJobs` (now + backoff delay).
+  - Scheduler will pick it up again when due.
+
+- Backoff Strategy:  
+  - **Exponential backoff** or **fixed delay** configurable per job.
+  - Max retries enforced via `retryCount`.
+
+---
+
+## 📌 Delivery Semantics
+
+- **At-Least-Once:**  
+  Guaranteed via Kafka re-delivery + Cassandra persistence.  
+  Duplicate executions possible → jobs must be **idempotent**.
+
+- **Exactly-Once (Best Effort):**
+  - Use Cassandra’s `IF NOT EXISTS` writes for execution markers.
+  - Job execution writes an **“execution token”** in Cassandra before running.
+  - If token exists, worker skips execution.
+  - This ensures a job is executed only once even if re-delivered.
+
+---
+
+## 📌 Deduplication
+
+- **Keyed by `jobId`**
+- Cassandra write with `IF NOT EXISTS` ensures duplicate jobs are ignored.
+- Worker ensures **idempotency** by checking the execution marker before running.
+
+---
+
+## 📌 Scalability
+
+- Cassandra cluster scales horizontally → handles large job storage.
+- Kafka partitions scale consumers across schedulers and workers.
+- Worker pool is auto-scalable (Kubernetes / ECS / VM-based).
+
+---
+
+## 📌 Monitoring & Observability
+
+- **Metrics Tracked:**
+  - Number of scheduled jobs.
+  - Number of executed jobs.
+  - Failure vs success ratio.
+  - Retry counts.
+- **Tools:** Prometheus + Grafana.
+
+---
+
+## 📌 Future Improvements
+
+- **Priority Queues:** Support high-priority jobs using separate topics.
+- **Cron Jobs:** Add recurring schedule support.
+- **Dead-Letter Queue (DLQ):** For jobs failing after max retries.
+- **Dynamic Backoff Policies:** Per-job configurable retry logic.
+- **Audit Log:** Maintain append-only audit trail in Cassandra.
+
+---
+
+## ✅ Guarantees
+
+- **High Availability:** No single point of failure. Cassandra + Kafka ensure persistence and recovery.
+- **Fault Tolerance:** Failures handled via retries and deduplication.
+- **Scalability:** Horizontal scaling of workers, schedulers, and Cassandra.
+- **Consistency:** Cassandra + Kafka together ensure strong eventual consistency.
 
 ---
