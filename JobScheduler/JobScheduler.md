@@ -28,7 +28,7 @@ The system is designed to reliably schedule, execute, and track jobs with strong
 4. **Result Processor**
    - Consumes results from `statusTopic`.
    - Updates Cassandra with final job status, retries, or error details.
-<img src="pr-system-design/JobScheduler/JobSchedulerPrasen.png" alt="JobScheduler" style="max-width: 100%;">
+<img src="JobSchedulerPrasen.png" alt="JobScheduler" style="max-width: 100%;">
 ---
 
 ## 📌 Data Modeling in Cassandra
