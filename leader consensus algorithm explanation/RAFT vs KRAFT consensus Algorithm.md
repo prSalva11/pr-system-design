@@ -29,7 +29,7 @@ The following sequence of steps demonstrates how a new leader is elected in a 5-
 All nodes start in the **Follower** state, expecting periodic heartbeats from a Leader. They are all currently in **Term 0**.
 *In the absence of a leader, all nodes are simply waiting for a heartbeat.*
 
-**Image Reference:** `RAFT-1.PNG`
+**Image Reference:** `images/RAFT-images/RAFT-1.PNG`
 *(Depicts all 5 nodes as blue 'Followers' in Term: 0)*
 
 ### Step 2: Election Timeout - Node 3 Becomes Candidate
@@ -40,7 +40,7 @@ Node 3's randomized **Election Timeout** expires.
 2.  It transitions from a **Follower** to a **Candidate** (yellow).
 3.  It votes for itself (Votes: 1).
 
-**Image Reference:** `RAFT-2.PNG`
+**Image Reference:** `images/RAFT-images/RAFT-2.PNG`
 *(Depicts Node 3 as the yellow 'Candidate' in Term: 1, while others remain 'Followers' in Term: 0)*
 
 ### Step 3: Vote Requests Sent
@@ -49,7 +49,7 @@ The Candidate (Node 3) immediately sends **RequestVote RPCs** (Remote Procedure 
 
 > *Node 3 asks the other nodes to acknowledge its bid for leadership in the new Term 1.*
 
-**Image Reference:** `RAFT-3.PNG`
+**Image Reference:** `images/RAFT-images/RAFT-3.PNG`
 *(Depicts Node 3 as 'Candidate' in Term: 1, and all other nodes as 'Followers' in Term: 1)*
 
 ### Step 4: Nodes Cast Votes
@@ -69,7 +69,7 @@ Node 3 receives votes from the **majority** of the cluster (4 out of 5 nodes).
 1.  Node 3 **transitions from a Candidate to the new Leader** (green).
 2.  All nodes in the cluster are now stably in **Term 1**.
 
-**Image Reference:** `RAFT-5.PNG`
+**Image Reference:** `images/RAFT-images/RAFT-5.PNG`
 *(Depicts Node 3 as the green 'Leader' with a crown, and all others as 'Followers', all in Term: 1)*
 
 ### Step 6: Leader Sends Heartbeats
@@ -78,7 +78,7 @@ The new Leader (Node 3) immediately begins sending **periodic Heartbeats** (Appe
 
 > *These heartbeats maintain leadership by resetting the Followers' Election Timers and preventing new elections.*
 
-**Image Reference:** `RAFT-6.PNG`
+**Image Reference:** `images/RAFT-images/RAFT-6.PNG`
 *(Depicts the final stable state: Node 3 is the 'Leader', and nodes 1, 2, 4, 5 are 'Followers', all in Term: 1)*
 
 ---
